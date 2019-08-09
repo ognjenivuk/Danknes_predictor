@@ -5,6 +5,10 @@ import json
 import math
 import random
 import itertools
+from matplotlib import pyplot as plt
+import numpy as np
+from datetime import datetime
+from data import read_vectors_from_files, load_scores
 
 def _test_train_split(data: list, split = 0.8):
     data_copy = data.copy()
@@ -13,20 +17,22 @@ def _test_train_split(data: list, split = 0.8):
     return data_copy[:split_index], data_copy[split_index:]
 
 class Model:
-    def __init__(self):
-        self.image_encoded, self.sentence_encoded, self.output = self.load_model_layers()
-        self.scores = tf.placeholder(tf.float32, shape=(None, 1))
+    def __init__(self, use_text = True):
+        self.image_encoded, self.sentence_encoded, self.output = self.load_model_layers(use_text)
+        self.scores = tf.placeholder(tf.float32, shape=(None, 1), name='scores')
         self.loss = self.calculate_loss(self.output, self.scores)
         self.optimizer = self.get_optimizer(self.loss)
         self.sess = tf.Session()
 
-    def load_model_layers(self):
-        image_encoded = tf.placeholder(tf.float32, shape = (None, 2048))
-        sentence_encoded = tf.placeholder(tf.float32, shape = (None, 512))
-        encoded_layer = tf.concat([image_encoded, sentence_encoded], axis = 1)
-        first_layer  = tf.layers.dense(encoded_layer , units = 512,  activation=tf.nn.relu)
+    def load_model_layers(self, use_text = True):
+        image_encoded = tf.placeholder(tf.float32, shape = (None, 2048), name='image_encoded')
+        sentence_encoded = tf.placeholder(tf.float32, shape = (None, 512), name='sentence_encoded')
+        both_encoded = tf.concat([image_encoded, sentence_encoded], axis = 1)
+        first_layer  = tf.layers.dense(both_encoded if use_text else image_encoded, units = 512,  activation=tf.nn.relu)
+        tf.layers.dropout(first_layer, 0.3)
         second_layer  = tf.layers.dense(first_layer , units = 256,  activation=tf.nn.relu)
-        output  = tf.layers.dense(second_layer, units = 1 )
+        tf.layers.dropout(second_layer, 0.3)
+        output  = tf.layers.dense(second_layer, units = 1, name = 'output' )
         return image_encoded, sentence_encoded, output
 
     def calculate_loss(self, output, truth):
@@ -34,76 +40,117 @@ class Model:
     
     def get_optimizer(self, loss, learning_rate = 0.01):
         return tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
+
+    def _run_batch(self, batch, do_optimize=False):
+        '''runs a batch and returns the loss'''
+        fetches = (self.optimizer, self.loss) if do_optimize else self.loss
+        result = self.sess.run(
+            fetches, 
+            feed_dict={self.image_encoded: batch['image'], self.sentence_encoded: batch['sentence'], self.scores: batch['scores']})
+            
+        if do_optimize:
+            return result[1]
+        else:
+            return result
     
-    def train(self, number_of_steps):
+    def train(self, number_of_steps, save_name):
         self.data = Data()
         self.sess.run(tf.global_variables_initializer())
+        saver = tf.train.Saver()
+        save_path = './trained_models/model_' + save_name + str(datetime.now()) +'.cpkt'
         
-        is_this_loss = []
-        
+        training_losses = []
+        validation_losses = []
         for cur_step in range(number_of_steps):
-            for batch in self.data.batches(is_training = True, number_of_samples=1000):
-                _, l = self.sess.run((self.optimizer, self.loss), \
-                    feed_dict={self.image_encoded: batch['image'], self.sentence_encoded: batch['sentence'], self.scores: batch['scores']})
-                is_this_loss.append(l)
-                
-            print(cur_step + 1, '/', number_of_steps, end='\r')
-        return is_this_loss
+
+            this_epoch_losses = []
+
+            for batch in self.data.train_batches(number_of_samples=1000):
+                l = self._run_batch(batch, do_optimize=True) 
+                this_epoch_losses.append(l)
+
+            training_losses.append(sum(this_epoch_losses) / len(this_epoch_losses))
+            
+            for batch in self.data.validation_batches():
+                validation_loss = self._run_batch(batch)
+            validation_losses.append(validation_loss)
+            progress = '=' * math.ceil(cur_step / number_of_steps * 80) + '>'
+            progress = progress.ljust(80)
+            progress = progress[:80]
+            print('[', progress, ']', 
+                f' [\x1b[31mtrain loss : {training_losses[-1]:.4f}\x1b[0m' 
+                f', \x1b[32mval loss : {validation_loss:.4f}\x1b[0m]                                  ', end='\r', sep='')
+        saver.save(self.sess, save_path)
+        print()
+        print('model saved at ' + save_path)
+        
+        return training_losses, validation_losses
     
     def test(self):
-        for batch in self.data.batches(is_training = False, number_of_samples=len(self.data.test_data)):
+        for batch in self.data.test_batches(number_of_samples=len(self.data.test_data)):
             test_loss = self.sess.run(self.loss, \
                 feed_dict={self.image_encoded: batch['image'], self.sentence_encoded: batch['sentence'], self.scores: batch['scores']})
         return test_loss
 
-def _read_vectors_from_files(file_dir):
-    encodings = {}
-    for vector_file in os.listdir(file_dir):
-        with open(os.path.join(file_dir, vector_file), 'r') as f:
-            encodings[os.path.splitext(vector_file)[0]] = [float(x) for x in f.read().split(' ')]
-
-    return encodings
 
 
 class Data:
     def __init__(self):
         image_encoding_dir = './Data/image_feature_vectors'
-        self.image_encodings = _read_vectors_from_files(image_encoding_dir)
+        self.image_encodings = read_vectors_from_files(image_encoding_dir)
         
         sentence_encoding_dir = './Data/sentence_feature_vectors'
-        self.sentence_encodings = _read_vectors_from_files(sentence_encoding_dir)
+        self.sentence_encodings = read_vectors_from_files(sentence_encoding_dir)
         
-        json_file = './Data/db.json'
-        with open(json_file) as f:
-            json_file_loaded = json.load(f)
+        self.scores = load_scores('./Data/db.json')
 
-        valid_keys = self.image_encodings.keys() & self.sentence_encodings.keys()
-
-        self.scores = {v['id'] : math.log(v['ups']) for v in json_file_loaded['_default'].values() if v['id'] in valid_keys}
         self.data = [
             (self.image_encodings[x],self.sentence_encodings[x],self.scores[x])
-            for x in valid_keys
-            if x in self.image_encodings and x in self.sentence_encodings and x in self.scores
+            for x in self.image_encodings.keys()
+            if x in self.sentence_encodings and x in self.scores
         ]
 
         self.train_data, self.test_data = _test_train_split(self.data)
+        self.train_data, self.validation_data = _test_train_split(self.train_data, 0.75)
 
+    def train_batches(self, number_of_samples = 100):
+        return self._get_batch(self.train_data, number_of_samples)
 
-    def batches(self, is_training ,number_of_samples = 100):
+    def test_batches(self, number_of_samples = -1):
+        return self._get_batch(self.train_data, number_of_samples)
+
+    def validation_batches(self, number_of_samples = -1):
+        return self._get_batch(self.validation_data, number_of_samples)
+
+    def _get_batch(self, data, number_of_samples):
         batch = {'image':[],'sentence':[],'scores':[]}
-        current_data = self.train_data if is_training else self.test_data
-        for i in current_data:
+        for i in data:
             batch['image'].append(i[0])
             batch['sentence'].append(i[1])
             batch['scores'].append([i[2]])
-            if len(batch) == number_of_samples:
+            if len(batch['image']) == number_of_samples:
                 yield batch
                 batch = {'image':[],'sentence':[],'scores':[]}
+                
         if batch['image']:
             yield batch
+
+
+SAVE_NAME_WO_TEXT = 'wo_text'
+SAVE_NAME_ALL = 'from_hub_modules'
+
 def main():
-    model = Model()
-    model.train(10)
+    seed = 5
+    random.seed(seed)
+    tf.random.set_random_seed(seed)
+
+    model = Model(use_text=True)
+    train_losses, validation_losses = model.train(300, save_name=SAVE_NAME_ALL)
+    plt.plot(np.clip(train_losses, 0, 70))
+    plt.plot(np.clip(validation_losses, 0, 70))
+    plt.legend(['train', 'validation'])
+    plt.title('is this loss')
+    plt.show()
     test_loss = model.test()
     print(f'test loss {test_loss}')
     

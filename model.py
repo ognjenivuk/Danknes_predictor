@@ -38,13 +38,20 @@ class Model:
     def train(self, number_of_steps):
         self.data = Data()
         self.sess.run(tf.global_variables_initializer())
-        for _ in range(number_of_steps):
-            for batch in self.data.batches(is_training = True):
+        
+        is_this_loss = []
+        
+        for cur_step in range(number_of_steps):
+            for batch in self.data.batches(is_training = True, number_of_samples=1000):
                 _, l = self.sess.run((self.optimizer, self.loss), \
                     feed_dict={self.image_encoded: batch['image'], self.sentence_encoded: batch['sentence'], self.scores: batch['scores']})
-                print(l)
+                is_this_loss.append(l)
+                
+            print(cur_step + 1, '/', number_of_steps, end='\r')
+        return is_this_loss
+    
     def test(self):
-        for batch in self.data.batches(is_training = False, number_of_sampels=len(self.data.test_data)):
+        for batch in self.data.batches(is_training = False, number_of_samples=len(self.data.test_data)):
             test_loss = self.sess.run(self.loss, \
                 feed_dict={self.image_encoded: batch['image'], self.sentence_encoded: batch['sentence'], self.scores: batch['scores']})
         return test_loss
@@ -82,20 +89,23 @@ class Data:
         self.train_data, self.test_data = _test_train_split(self.data)
 
 
-    def batches(self, is_training ,number_of_sampels = 100):
+    def batches(self, is_training ,number_of_samples = 100):
         batch = {'image':[],'sentence':[],'scores':[]}
         current_data = self.train_data if is_training else self.test_data
         for i in current_data:
             batch['image'].append(i[0])
             batch['sentence'].append(i[1])
             batch['scores'].append([i[2]])
-            if len(batch) == number_of_sampels:
+            if len(batch) == number_of_samples:
                 yield batch
                 batch = {'image':[],'sentence':[],'scores':[]}
         if batch['image']:
             yield batch
-
-model = Model()
-model.train(10)
-test_loss = model.test()
-print(f'test loss {test_loss}')
+def main():
+    model = Model()
+    model.train(10)
+    test_loss = model.test()
+    print(f'test loss {test_loss}')
+    
+if __name__ == '__main__':
+    main()

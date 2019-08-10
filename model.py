@@ -54,9 +54,9 @@ class Model:
             l.append(image_encoded)
 
         both_encoded = tf.concat(l, axis = 1)
-        last_fc_layer = self._create_fc_layers([512], both_encoded if use_text else image_encoded, 
+        last_fc_layer = self._create_fc_layers([7500, 3500], both_encoded if use_text else image_encoded, 
             kernel_regularizer=regulizer, 
-            activation=tf.nn.sigmoid)
+            activation=tf.nn.relu)
         output  = tf.layers.dense(last_fc_layer, units = 1, name = 'output')
         return image_encoded, sentence_encoded, output
 
@@ -126,9 +126,9 @@ class Model:
                     validation_loss, validation_mse, validation_output = self._run_batch(batch, (self.loss, self.mse, self.output), no_dropout=True)
                     validation_truth = np.array(batch['scores'])
                 validation_losses.append(validation_loss)
-                progress = '=' * math.ceil(cur_step / number_of_steps * 80) + '>'
-                progress = progress.ljust(80)
-                progress = progress[:80]
+                progress = '=' * math.ceil(cur_step / number_of_steps * 40) + '>'
+                progress = progress.ljust(40)
+                progress = progress[:40]
 
                 # magic.add_vals(training_losses[-1], validation_mse)
 
@@ -195,7 +195,7 @@ class Data:
             if x in self.sentence_encodings and x in self.scores
         ]
 
-        self.train_data, self.test_data = _test_train_split(self.data, 0.8)
+        self.train_data, self.test_data = _test_train_split(self.data, 0.4)
         self.train_data, self.validation_data = _test_train_split(self.train_data, 0.75)
 
     def train_batches(self, number_of_samples = 100):
@@ -209,6 +209,7 @@ class Data:
 
     def _get_batch(self, data, number_of_samples):
         batch = {'image':[],'sentence':[],'scores':[]}
+        random.shuffle(data)
         for i in data:
             batch['image'].append(i[0])
             batch['sentence'].append(i[1])
@@ -233,14 +234,14 @@ def main():
 
     # scores_train = [x[2] for x in data.train_data]
     # scores_test = [x[2] for x in data.test_data]
-
+    
     # plt.hist(scores_train, 100)
     # plt.hist(scores_test, 100)
     # plt.legend(['train scores', 'test scores'])
-    # plt.title('train and test scores histogram')
+    # plt.title(f'train and test scores histogram')
     # plt.show()
 
-    model = Model(reg_param=0, dro_param=0.7)
+    model = Model(reg_param=0, dro_param=None)
     train_losses, validation_losses = model.train(10000, save_name=None)
     plt.plot(train_losses)
     plt.plot(validation_losses)

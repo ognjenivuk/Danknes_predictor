@@ -23,23 +23,25 @@ def corr(x, y):
 class Model:
     def __init__(self, use_text = True, reg_param = 0.01, dro_param = 0.3, use_image = True):
         self.sess = tf.Session()
-        self.image_encoded, self.sentence_encoded, self.output = self.load_model_layers(use_text, dro_param, use_image)
+        self.keep_prob = tf.placeholder_with_default(dro_param or 1.0, (), name='keep_prob')
+        self.image_encoded, self.sentence_encoded, self.output = self.load_model_layers(use_text, use_image)
         self.scores = tf.placeholder(tf.float32, shape=(None, 1), name='scores')
         self.loss, self.mse= self.calculate_loss(self.output, self.scores, reg_param)
         self.optimizer = self.get_optimizer(self.loss)
 
-    def _create_fc_layers(self, sizes, input, kernel_regularizer, activation, do_rate = None):
+    def _create_fc_layers(self, sizes, input, kernel_regularizer, activation):
         layer = tf.layers.dense(input, units=sizes[0], activation = activation, kernel_regularizer = kernel_regularizer)
-        dp = tf.nn.dropout(layer, rate=do_rate) if do_rate is not None else layer
+        dp = tf.nn.dropout(layer, keep_prob=self.keep_prob)
 
         for i in range(1, len(sizes)):
             layer = tf.layers.dense(dp, units=sizes[i], activation = activation, kernel_regularizer = kernel_regularizer)
-            dp = tf.nn.dropout(layer, rate=do_rate) if do_rate is not None else layer
+            dp = tf.nn.dropout(layer, keep_prob=self.keep_prob)
+        
             
         return dp
         
 
-    def load_model_layers(self, use_text = True, dro_param = 0.3, use_image = True):
+    def load_model_layers(self, use_text, use_image):
         regulizer = tf.contrib.layers.l1_l2_regularizer(scale_l1=1.0, scale_l2=1.0)
         image_encoded = tf.placeholder(tf.float32, shape = (None, 1280), name='image_encoded')
         sentence_encoded = tf.placeholder(tf.float32, shape = (None, 512), name='sentence_encoded')
@@ -52,7 +54,9 @@ class Model:
             l.append(image_encoded)
 
         both_encoded = tf.concat(l, axis = 1)
-        last_fc_layer = self._create_fc_layers([128, 64, 32, 16, 8, 4, 2], both_encoded if use_text else image_encoded, regulizer, tf.nn.relu, dro_param)
+        last_fc_layer = self._create_fc_layers([512], both_encoded if use_text else image_encoded, 
+            kernel_regularizer=regulizer, 
+            activation=tf.nn.sigmoid)
         output  = tf.layers.dense(last_fc_layer, units = 1, name = 'output')
         return image_encoded, sentence_encoded, output
 
@@ -65,11 +69,21 @@ class Model:
         return tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
         
 
-    def _run_batch(self, batch, fetches):
+    def _run_batch(self, batch, fetches, no_dropout=False):
         '''runs a batch and returns the loss'''
+        feed_dict = {
+            self.image_encoded: batch['image'], 
+            self.sentence_encoded: batch['sentence'], 
+            self.scores: batch['scores']
+        }
+
+        if no_dropout:
+            feed_dict[self.keep_prob] = 1
+        
         return self.sess.run(
             fetches, 
-            feed_dict={self.image_encoded: batch['image'], self.sentence_encoded: batch['sentence'], self.scores: batch['scores']})
+            feed_dict=feed_dict
+        )
             
     def _plot_train_model(self):
         for batch in self.data.train_batches(number_of_samples=-1):
@@ -103,13 +117,13 @@ class Model:
                 this_epoch_losses = []
 
                 for batch in self.data.train_batches(number_of_samples=1000):
-                    _, l, mse_ = self._run_batch(batch, (self.optimizer, self.loss, self.mse)) 
-                    this_epoch_losses.append(mse_)
+                    _, l, mse = self._run_batch(batch, (self.optimizer, self.loss, self.mse)) 
+                    this_epoch_losses.append(mse)
 
                 training_losses.append(sum(this_epoch_losses) / len(this_epoch_losses))
                 
                 for batch in self.data.validation_batches():
-                    validation_loss, validation_mse, validation_output = self._run_batch(batch, (self.loss, self.mse, self.output))
+                    validation_loss, validation_mse, validation_output = self._run_batch(batch, (self.loss, self.mse, self.output), no_dropout=True)
                     validation_truth = np.array(batch['scores'])
                 validation_losses.append(validation_loss)
                 progress = '=' * math.ceil(cur_step / number_of_steps * 80) + '>'
@@ -119,10 +133,12 @@ class Model:
                 # magic.add_vals(training_losses[-1], validation_mse)
 
                 corr_coef = corr(validation_output, validation_truth)
+                output_std = validation_output.std()
+                intput_std = validation_truth.std()
 
                 print('[', progress, ']', 
                     f' [\x1b[31mtrain mse : {training_losses[-1]:.4f}\x1b[0m' 
-                    f', \x1b[32mval mse : {validation_mse:.4f}\x1b[0m, corr : {corr_coef}] {cur_step} / {number_of_steps}                       ', end='\r', sep='')
+                    f', \x1b[32mval mse : {validation_mse:.4f}\x1b[0m, stat : {intput_std:.2f} {corr_coef:.2f} {output_std:.2f}] {cur_step} / {number_of_steps}                       ', end='\r', sep='')
                     
             print()
         except KeyboardInterrupt:
@@ -142,7 +158,7 @@ class Model:
 
     def test_classy(self):
         for batch in self.data.validation_batches():
-            output, mse = self._run_batch(batch, (self.output, self.mse))
+            output, mse = self._run_batch(batch, (self.output, self.mse), no_dropout=True)
             truth = np.array(batch['scores'])
 
         plt.plot(truth, truth, 'r-')
@@ -224,7 +240,7 @@ def main():
     # plt.title('train and test scores histogram')
     # plt.show()
 
-    model = Model(reg_param=0.1, dro_param=None)
+    model = Model(reg_param=0, dro_param=0.7)
     train_losses, validation_losses = model.train(10000, save_name=None)
     plt.plot(train_losses)
     plt.plot(validation_losses)

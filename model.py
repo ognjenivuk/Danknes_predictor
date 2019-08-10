@@ -9,6 +9,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 from datetime import datetime
 from data import read_vectors_from_files, load_scores, plot_confusion_matrix
+import magic
 
 def _test_train_split(data: list, split = 0.8):
     data_copy = data.copy()
@@ -16,27 +17,51 @@ def _test_train_split(data: list, split = 0.8):
     split_index = int(len(data_copy) * split)
     return data_copy[:split_index], data_copy[split_index:]
 
+def corr(x, y):
+    return np.corrcoef(x.flatten(), y.flatten())[1, 0]
+
 class Model:
-    def __init__(self, use_text = True):
+    def __init__(self, use_text = True, reg_param = 0.01, dro_param = 0.3, use_image = True):
         self.sess = tf.Session()
-        self.image_encoded, self.sentence_encoded, self.output = self.load_model_layers(use_text)
+        self.image_encoded, self.sentence_encoded, self.output = self.load_model_layers(use_text, dro_param, use_image)
         self.scores = tf.placeholder(tf.float32, shape=(None, 1), name='scores')
-        self.loss= self.calculate_loss(self.output, self.scores)
+        self.loss, self.mse= self.calculate_loss(self.output, self.scores, reg_param)
         self.optimizer = self.get_optimizer(self.loss)
 
-    def load_model_layers(self, use_text = True):
+    def _create_fc_layers(self, sizes, input, kernel_regularizer, activation, do_rate = None):
+        layer = tf.layers.dense(input, units=sizes[0], activation = activation, kernel_regularizer = kernel_regularizer)
+        dp = tf.nn.dropout(layer, rate=do_rate) if do_rate is not None else layer
+
+        for i in range(1, len(sizes)):
+            layer = tf.layers.dense(dp, units=sizes[i], activation = activation, kernel_regularizer = kernel_regularizer)
+            dp = tf.nn.dropout(layer, rate=do_rate) if do_rate is not None else layer
+            
+        return dp
+        
+
+    def load_model_layers(self, use_text = True, dro_param = 0.3, use_image = True):
+        regulizer = tf.contrib.layers.l1_l2_regularizer(scale_l1=1.0, scale_l2=1.0)
         image_encoded = tf.placeholder(tf.float32, shape = (None, 1280), name='image_encoded')
         sentence_encoded = tf.placeholder(tf.float32, shape = (None, 512), name='sentence_encoded')
-        both_encoded = tf.concat([image_encoded, sentence_encoded], axis = 1)
-        layer1 = tf.layers.dense(both_encoded, units=256, activation = tf.nn.sigmoid)
-        dp = tf.nn.dropout(layer1, rate = 0.3)
-        output  = tf.layers.dense(dp, units = 1, bias_initializer = tf.initializers.constant(value = 3.7), name = 'output')
+
+        l = []
+        if use_text:
+            l.append(sentence_encoded)
+
+        if use_image:
+            l.append(image_encoded)
+
+        both_encoded = tf.concat(l, axis = 1)
+        last_fc_layer = self._create_fc_layers([128, 64, 32, 16, 8, 4, 2], both_encoded if use_text else image_encoded, regulizer, tf.nn.relu, dro_param)
+        output  = tf.layers.dense(last_fc_layer, units = 1, name = 'output')
         return image_encoded, sentence_encoded, output
 
-    def calculate_loss(self, output, truth):
-        return tf.reduce_sum(tf.square(output - truth))
+    def calculate_loss(self, output, truth, beta):
+        mse = tf.reduce_mean(tf.square(output - truth))
+        regularization_loss = tf.reduce_mean(tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
+        return  mse + beta*regularization_loss, mse
     
-    def get_optimizer(self, loss, learning_rate = 0.005):
+    def get_optimizer(self, loss, learning_rate = 0.01):
         return tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
         
 
@@ -70,26 +95,34 @@ class Model:
         training_losses = []
         validation_losses = []
 
+        # magic.init_loss()
+
         try:
             for cur_step in range(number_of_steps):
 
                 this_epoch_losses = []
 
                 for batch in self.data.train_batches(number_of_samples=1000):
-                    _, l = self._run_batch(batch, (self.optimizer, self.loss)) 
-                    this_epoch_losses.append(l)
+                    _, l, mse_ = self._run_batch(batch, (self.optimizer, self.loss, self.mse)) 
+                    this_epoch_losses.append(mse_)
 
                 training_losses.append(sum(this_epoch_losses) / len(this_epoch_losses))
                 
                 for batch in self.data.validation_batches():
-                    validation_loss = self._run_batch(batch, self.loss)
+                    validation_loss, validation_mse, validation_output = self._run_batch(batch, (self.loss, self.mse, self.output))
+                    validation_truth = np.array(batch['scores'])
                 validation_losses.append(validation_loss)
                 progress = '=' * math.ceil(cur_step / number_of_steps * 80) + '>'
                 progress = progress.ljust(80)
                 progress = progress[:80]
+
+                # magic.add_vals(training_losses[-1], validation_mse)
+
+                corr_coef = corr(validation_output, validation_truth)
+
                 print('[', progress, ']', 
-                    f' [\x1b[31mtrain loss : {training_losses[-1]:.4f}\x1b[0m' 
-                    f', \x1b[32mval loss : {validation_loss:.4f}\x1b[0m] {cur_step} / {number_of_steps}                       ', end='\r', sep='')
+                    f' [\x1b[31mtrain mse : {training_losses[-1]:.4f}\x1b[0m' 
+                    f', \x1b[32mval mse : {validation_mse:.4f}\x1b[0m, corr : {corr_coef}] {cur_step} / {number_of_steps}                       ', end='\r', sep='')
                     
             print()
         except KeyboardInterrupt:
@@ -99,22 +132,17 @@ class Model:
 
         if save_name:
             saver.save(self.sess, save_path)
+            print()
             print('model saved at ' + save_path)
         
         return training_losses, validation_losses
-    
-    def test(self):
-        for batch in self.data.test_batches(number_of_samples=len(self.data.test_data)):
-            test_loss, test_output = self.sess.run((self.loss, self.output), \
-                feed_dict={self.image_encoded: batch['image'], self.sentence_encoded: batch['sentence'], self.scores: batch['scores']})
-        return test_loss, test_output
 
     def _are_you_dank(self, score):
         return (np.ones_like(score, dtype=np.int32) * 3) - (score < 2.7) - (score < 4.7) - (score < 7.8)
 
     def test_classy(self):
-        for batch in self.data.test_batches():
-            output = self._run_batch(batch, self.output)
+        for batch in self.data.validation_batches():
+            output, mse = self._run_batch(batch, (self.output, self.mse))
             truth = np.array(batch['scores'])
 
         plt.plot(truth, truth, 'r-')
@@ -122,17 +150,18 @@ class Model:
         plt.legend(['ground_truth', 'output'])
         plt.xlabel('output')
         plt.ylabel('truth')
-        plt.title(f'output on test set \n  loss on test set : {np.mean(np.square(output - truth))}')
+        correlation = np.corrcoef(truth.flatten(), output.flatten())[1,0]
+        plt.title(f'output on validation set \n  mse on validation set : {mse} \n rho = {correlation}')
         plt.show()
 
-        true_classes = self._are_you_dank(truth).astype(np.int32).flatten()
-        output_classes = self._are_you_dank(output).astype(np.int32).flatten()
-        plot_confusion_matrix(
-            true_classes, 
-            output_classes, 
-            np.array(['bad', 'meh', 'less meh', 'dank']))
-        plt.title('confusion matrix on test set')
-        plt.show()
+        # true_classes = self._are_you_dank(truth).astype(np.int32).flatten()
+        # output_classes = self._are_you_dank(output).astype(np.int32).flatten()
+        # plot_confusion_matrix(
+        #     true_classes, 
+        #     output_classes, 
+        #     np.array(['bad', 'meh', 'less meh', 'dank']))
+        # plt.title('confusion matrix on test set')
+        # plt.show()
 
 class Data:
     def __init__(self):
@@ -184,33 +213,33 @@ def main():
     random.seed(seed)
     tf.random.set_random_seed(seed)
 
-    data = Data()
+    # data = Data()
 
-    scores_train = [x[2] for x in data.train_data]
-    scores_test = [x[2] for x in data.test_data]
+    # scores_train = [x[2] for x in data.train_data]
+    # scores_test = [x[2] for x in data.test_data]
 
-    plt.hist(scores_train, 100)
-    plt.hist(scores_test, 100)
-    plt.legend(['train scores', 'test scores'])
-    plt.title('train and test scores histogram')
-    plt.show()
+    # plt.hist(scores_train, 100)
+    # plt.hist(scores_test, 100)
+    # plt.legend(['train scores', 'test scores'])
+    # plt.title('train and test scores histogram')
+    # plt.show()
 
-    model = Model(use_text=True)
-    train_losses, validation_losses = model.train(5000, save_name=SAVE_NAME_ALL)
-    plt.plot(np.log(train_losses))
-    plt.plot(np.log(validation_losses))
+    model = Model(reg_param=0.1, dro_param=None)
+    train_losses, validation_losses = model.train(10000, save_name=None)
+    plt.plot(train_losses)
+    plt.plot(validation_losses)
     plt.legend(['train', 'validation'])
     plt.title('log scale loss on train/validation')
     plt.show()
 
-    test_loss, test_output = model.test()
-    plt.hist2d(scores_test, test_output.flatten(), bins = 50)
-    plt.title(f'2d histogram of test output/test gorund truth \n test loss is {test_loss}')
-    plt.show()
+    # test_loss, test_output = model.test()
+    # plt.hist2d(scores_test, test_output.flatten(), bins = 50)
+    # plt.title(f'2d histogram of test output/test gorund truth \n test loss is {test_loss}')
+    # plt.show()
+    #
+    # print(f'test loss {test_loss}')
 
-    print(f'test loss {test_loss}')
- 
     model.test_classy()
-     
+        
 if __name__ == '__main__':
     main()

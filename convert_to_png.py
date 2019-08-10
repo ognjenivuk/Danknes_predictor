@@ -2,7 +2,7 @@
 import os
 import cv2
 
-data_set = './Data/memes'
+data_set = './Data/new_data/merged'
 for image_name in os.listdir(data_set):
     if image_name[-3:] == 'jpg':
         image_path = os.path.join(data_set,image_name)

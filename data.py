@@ -19,7 +19,7 @@ def load_scores(json_file):
     with open(json_file) as f:
         json_file_loaded = json.load(f)
 
-    scores = {v['id'] : math.log(v['ups']) for v in json_file_loaded['_default'].values()}
+    scores = {v['id'] : math.log(v['ups'] + 1) for v in json_file_loaded.values()}
 
     return scores
 

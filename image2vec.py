@@ -3,6 +3,7 @@ import tensorflow_hub as hub
 import tensorflow as tf
 import numpy as np
 import os
+import json
 
 def add_image_deocding(module):
   """Adds operations that perform JPEG decoding and resizing to the graph..
@@ -40,14 +41,21 @@ def get_feature_extractor( module_path = 'https://tfhub.dev/google/imagenet/ince
     feature_vector = module(resized_image)
     return input_file, feature_vector
 
-data_set = './Data/memes'
-feature_vectors = './Data/feature_vectors'
-input_tensor, feature_vector = get_feature_extractor()
+json_file = './Data/new_data/db.json'
+with open(json_file) as f:
+    memes = json.load(f)
+brojac = 0
+feature_vectors = './Data/new_data/image_feature_vectors'
+input_tensor, feature_vector = get_feature_extractor('https://tfhub.dev/google/imagenet/mobilenet_v2_100_224/feature_vector/3')
 with tf.Session() as sess:
     sess.run(tf.global_variables_initializer())
-    for image in os.listdir(data_set):
+    for image_data in memes.values():
         try:
-            feature_vector_calculated = sess.run(feature_vector, feed_dict={input_tensor:os.path.join(data_set, image)})
-            np.savetxt(os.path.join(feature_vectors, image[:-3]+'txt'), feature_vector_calculated)
-        except Exception:
-            print(image)
+            feature_vector_calculated = \
+            sess.run(feature_vector, feed_dict={input_tensor:os.path.join('./Data/new_data/merged', image_data['filename'].replace('.jpg', '.png'))})
+            np.savetxt(os.path.join(feature_vectors, image_data['id']+'.txt'), feature_vector_calculated)
+        except Exception as e: 
+            print(image_data['id'])
+            print(e)
+            brojac += 1
+print(brojac)

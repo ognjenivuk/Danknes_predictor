@@ -180,7 +180,7 @@ SAVE_NAME_WO_TEXT = 'wo_text'
 SAVE_NAME_ALL = 'from_hub_modules'
 
 def main():
-    seed = 5
+    seed = 6
     random.seed(seed)
     tf.random.set_random_seed(seed)
 

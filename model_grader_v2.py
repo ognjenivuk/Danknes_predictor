@@ -10,6 +10,7 @@ import numpy as np
 from datetime import datetime
 from data import read_vectors_from_files, load_scores, plot_confusion_matrix
 import magic
+from scipy.stats import binom_test
 
 def _test_train_split(data, split):
     data2 = data.copy()
@@ -48,8 +49,9 @@ class Data:
         return self._get_batch(self.validation_data, number_of_samples)
 
     def _make_pairs(self, data):
-        half = len(data) // 2
-        return zip(data[:half], data[half:])
+        data2 = data.copy()
+        data2.reverse()
+        return zip(data, data2)
 
     def _get_batch(self, data, number_of_samples):
         batch = {'image':[],'sentence':[],'scores':[]}
@@ -85,11 +87,18 @@ class Model:
         self.optimizer = self.get_optimizer(self.loss, learning_rate)
 
     def _make_fc_layers(self, input, units, activation, keep_prob, kernel_regularizer):
-        layer = tf.layers.dense(input, units=units[0], activation=activation)
-        # drop = tf.nn.dropout(layer, keep_prob = keep_prob)
+
+        def make_dense(inp, size):
+            layer = tf.layers.dense(inp, units=size, 
+                activation=activation,
+                #kernel_regularizer=kernel_regularizer,
+                kernel_initializer=tf.random_normal_initializer(0.0, 1.0)
+            )
+            return layer
+
+        layer = make_dense(input, units[0])
         for i in range(1, len(units)):
-            layer = tf.layers.dense(layer, units=units[i], activation=activation)
-            # drop = tf.nn.dropout(layer, keep_prob = keep_prob)
+            layer = make_dense(layer, units[i])
         return layer
 
     def save_grpah(self):
@@ -108,14 +117,14 @@ class Model:
             
         input_layer = tf.concat(input_list, axis = 1)
         
-        last_fc_layer = self._make_fc_layers(input_layer, [1024, 1024, 1024, 1024, 1024], activation=tf.nn.relu, keep_prob = self.keep_prob, kernel_regularizer=regulizer)
-        self.output = tf.layers.dense(last_fc_layer, units = 1, activation = tf.nn.sigmoid, bias_initializer=tf.constant_initializer(1))
-
+        last_fc_layer = self._make_fc_layers(input_layer, [1024, 1024, 1024], activation=tf.nn.relu, keep_prob = self.keep_prob, kernel_regularizer=regulizer)
+        self.output = tf.layers.dense(last_fc_layer, units = 1, activation = None, kernel_initializer=tf.random_normal_initializer(0.0, 1.0))
+        self.output_for_inference = tf.nn.sigmoid(self.output)
         
 
     def calculate_loss(self, logits, labels, beta):
         regularization_loss = tf.reduce_sum(tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
-        cross_entropy = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(logits = logits, labels = labels))
+        cross_entropy = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(logits = logits, labels = labels), axis=1)
         return cross_entropy + beta*regularization_loss, cross_entropy
     
     def get_optimizer(self, loss, learning_rate):
@@ -132,14 +141,12 @@ class Model:
 
         return output
 
-    def train(self, epochs, save_name = ''):
+    def train(self, epochs):
 
         data = Data()
         self.sess.run(tf.initialize_all_variables())
 
-        if save_name:
-            saver = tf.train.Saver()
-            save_path = './trained_models/model_' + save_name + '_' + str(datetime.now()) +'.cpkt'
+        saver = tf.train.Saver()
         
         training_losses = []
         validation_losses = []
@@ -156,21 +163,36 @@ class Model:
                 training_losses.append(training_loss)
 
                 for batch in data.validation_batches(-1):
-                    ce = self._run_batch(self.cross_entropy, batch)
+                    ce, val_output, val_truth = self._run_batch([ self.cross_entropy, self.output_for_inference, self.truth ], batch)
+                    val_output = np.where(val_output > 0.5, 1, 0).flatten().astype(np.int32)
+                    val_truth = np.where(val_truth > 0.5, 1, 0).flatten().astype(np.int32)
 
                 validation_losses.append(np.average(ce))
+                validation_acc = np.mean(val_output == val_truth) * 100
 
-                print(f'| epoch {epoch} | trn ce {training_loss:.4f} | val ce {validation_losses[-1]:.4f} |                  ', end='\r')
+                print(f'| epoch {epoch} | trn ce {training_loss:.4f} | val ce {validation_losses[-1]:.4f} | val acc {validation_acc:.2f}                  ', end='\r')
         except KeyboardInterrupt:
             pass
         
-        if save_name:
-            saver.save(self.sess, save_path)
-            print()
-            print('model saved at ' + save_path)
+        print()
+
+        plt.plot(validation_losses)
+        plt.plot(training_losses)
+        plt.legend(['validation', 'training'])
+        plt.title('cross-entropy')
+        plt.show()
 
         self._plot_results(data.train_batches(-1), 'train')
         self._plot_results(data.validation_batches(-1), 'validation')
+
+        
+        save_name = input('model save name [default: dont save]: ')
+
+        if save_name:
+            save_path = './trained_models/model_' + save_name + '_' + str(datetime.now()) +'.cpkt'
+            saver.save(self.sess, save_path)
+            print()
+            print('model saved at ' + save_path)
             
     def _plot_results(self, batches, name):
 
@@ -178,7 +200,7 @@ class Model:
         truth = []
 
         for batch in batches:
-            out, tru = self._run_batch([ self.output, self.truth ], batch)
+            out, tru = self._run_batch([ self.output_for_inference, self.truth ], batch)
             output.append(out)
             truth.append(tru)
 
@@ -192,7 +214,25 @@ class Model:
         plt.hist(truth, bins=50, range=(0.0, 1.0))
         plt.title('truth distribution on ' + name)
         plt.show()
-            
+
+        def step(x, point=0.5):
+            return np.where(x > point, 1, 0).astype(np.int32)
+
+        truth = step(truth)
+        output = step(output)
+        
+        plot_confusion_matrix(truth, output, np.array([0, 1]), 
+            title='confusion matrix for ' + name
+        )
+        plt.show()
+
+        accuracy = np.average(truth == output)
+        stat_sig = binom_test(np.count_nonzero(truth==output), n=len(truth))
+        print()
+        print(f' ==== {name} ==== ')
+        print(f'accuracy = {accuracy}')
+        print(f'       p = {stat_sig}')    
+                
 
 def main():
     #beta = regularization param
@@ -200,9 +240,8 @@ def main():
     model = Model(dro_param = 1.0, beta = 0, learning_rate = 0.01)
     
     model.save_grpah()
-    save_name = input('model save name [default: dont save]: ')
 
-    model.train(1000, save_name=save_name)
+    model.train(1000)
     
 if __name__ == "__main__":
     main()

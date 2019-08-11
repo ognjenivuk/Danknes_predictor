@@ -20,13 +20,16 @@ def _test_train_split(data: list, split = 0.8):
 def corr(x, y):
     return np.corrcoef(x.flatten(), y.flatten())[1, 0]
 
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
 class Model:
     def __init__(self, use_text = True, reg_param = 0.01, dro_param = 0.3, use_image = True):
         self.sess = tf.Session()
         self.keep_prob = tf.placeholder_with_default(dro_param or 1.0, (), name='keep_prob')
-        self.image_encoded, self.sentence_encoded, self.output = self.load_model_layers(use_text, use_image)
+        self.image_encoded_1, self.image_encoded_2, self.sentence_encoded_1, self.sentence_encoded_2, self.output = self.load_model_layers(use_text, use_image)
         self.scores = tf.placeholder(tf.float32, shape=(None, 1), name='scores')
-        self.loss, self.mse= self.calculate_loss(self.output, self.scores, reg_param)
+        self.loss, self.crossentropy = self.calculate_loss(self.output, self.scores, reg_param)
         self.optimizer = self.get_optimizer(self.loss)
 
     def _create_fc_layers(self, sizes, input, kernel_regularizer, activation):
@@ -36,34 +39,44 @@ class Model:
         for i in range(1, len(sizes)):
             layer = tf.layers.dense(dp, units=sizes[i], activation = activation, kernel_regularizer = kernel_regularizer)
             dp = tf.nn.dropout(layer, keep_prob=self.keep_prob)
-        
-            
+                    
         return dp
         
 
     def load_model_layers(self, use_text, use_image):
         regulizer = tf.contrib.layers.l1_l2_regularizer(scale_l1=1.0, scale_l2=1.0)
-        image_encoded = tf.placeholder(tf.float32, shape = (None, 1280), name='image_encoded')
-        sentence_encoded = tf.placeholder(tf.float32, shape = (None, 512), name='sentence_encoded')
+        
+        image_encoded_1 = tf.placeholder(tf.float32, shape = (None, 1280), name='image_encoded_1')
+        image_encoded_2 = tf.placeholder(tf.float32, shape = (None, 1280), name='image_encoded_2')
+        sentence_encoded_1 = tf.placeholder(tf.float32, shape = (None, 512), name='sentence_encoded_1')
+        sentence_encoded_2 = tf.placeholder(tf.float32, shape = (None, 512), name='sentence_encoded_2')
 
         l = []
         if use_text:
-            l.append(sentence_encoded)
+            l.append(sentence_encoded_1)
+            l.append(sentence_encoded_2)
 
         if use_image:
-            l.append(image_encoded)
+            l.append(image_encoded_1)
+            l.append(image_encoded_2)
 
-        both_encoded = tf.concat(l, axis = 1)
-        last_fc_layer = self._create_fc_layers([1024, 1024], both_encoded if use_text else image_encoded, 
+        all_encoded = tf.concat(l, axis = 1)
+        last_fc_layer = self._create_fc_layers(
+            [512], 
+            all_encoded,
             kernel_regularizer=regulizer, 
-            activation=tf.nn.relu)
-        output  = tf.layers.dense(last_fc_layer, units = 2, name = 'output')
-        return image_encoded, sentence_encoded, output
+            activation=tf.nn.relu
+        )
+        output = tf.layers.dense(last_fc_layer, units=1, name = 'output', activation=tf.nn.sigmoid)
+        return image_encoded_1, image_encoded_2, sentence_encoded_1, sentence_encoded_2, output
 
     def calculate_loss(self, output, truth, beta):
-        mse = tf.nn.sigmoid_cross_entropy_with_logits(labels=truth, logits=output)
+        cross_entropy = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(
+            labels=truth,
+            logits=output
+        ))
         regularization_loss = tf.reduce_mean(tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES))
-        return  mse + beta*regularization_loss, mse
+        return cross_entropy + beta*regularization_loss, cross_entropy
     
     def get_optimizer(self, loss, learning_rate = 0.01):
         return tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
@@ -72,9 +85,11 @@ class Model:
     def _run_batch(self, batch, fetches, no_dropout=False):
         '''runs a batch and returns the loss'''
         feed_dict = {
-            self.image_encoded: batch['image'], 
-            self.sentence_encoded: batch['sentence'], 
-            self.scores: batch['scores']
+            self.image_encoded_1: batch['image'][:, 0], 
+            self.image_encoded_2: batch['image'][:, 1], 
+            self.sentence_encoded_1: batch['sentence'][:, 0], 
+            self.sentence_encoded_2: batch['sentence'][:, 1], 
+            self.scores: batch['scores'].reshape((-1, 1))
         }
 
         if no_dropout:
@@ -84,18 +99,19 @@ class Model:
             fetches, 
             feed_dict=feed_dict
         )
+
             
     def _plot_train_model(self):
         for batch in self.data.train_batches(number_of_samples=-1):
             output = self._run_batch(batch, self.output)
-            truth = np.array(batch['scores'])
+            truth = sigmoid(batch['scores'][:,0] - batch['scores'][:,1])
 
         plt.plot(truth, truth, 'r-')
         plt.plot(output, truth, '.')
         plt.legend(['ground_truth', 'output'])
         plt.xlabel('output')
         plt.ylabel('truth')
-        plt.title('output on training set')
+        plt.title(f'output on training set\n{output[:5]}')
         plt.show()
 
     def train(self, number_of_steps, save_name):
@@ -117,28 +133,27 @@ class Model:
                 this_epoch_losses = []
 
                 for batch in self.data.train_batches(number_of_samples=1000):
-                    _, l, mse = self._run_batch(batch, (self.optimizer, self.loss, self.mse)) 
-                    this_epoch_losses.append(mse)
-
+                    _, l, cross_entropy = self._run_batch(batch, (self.optimizer, self.loss, self.crossentropy)) 
+                    this_epoch_losses.append(cross_entropy)
                 training_losses.append(sum(this_epoch_losses) / len(this_epoch_losses))
                 
                 for batch in self.data.validation_batches():
-                    validation_loss, validation_mse, validation_output = self._run_batch(batch, (self.loss, self.mse, self.output), no_dropout=True)
+                    validation_loss, validation_cross_entropy, validation_output = self._run_batch(batch, (self.loss, self.crossentropy, self.output), no_dropout=True)
                     validation_truth = np.array(batch['scores'])
                 validation_losses.append(validation_loss)
                 progress = '=' * math.ceil(cur_step / number_of_steps * 40) + '>'
                 progress = progress.ljust(40)
                 progress = progress[:40]
 
-                # magic.add_vals(training_losses[-1], validation_mse)
+                # magic.add_vals(training_losses[-1], validation_cross_entropy)
 
-                corr_coef = corr(validation_output, validation_truth)
-                output_std = validation_output.std()
-                intput_std = validation_truth.std()
+                corr_coef = 0#corr(validation_output, validation_truth)
+                output_std = 0#validation_output.std()
+                intput_std = 0#validation_truth.std()
 
                 print('[', progress, ']', 
-                    f' [\x1b[31mtrain mse : {training_losses[-1]:.4f}\x1b[0m' 
-                    f', \x1b[32mval mse : {validation_mse:.4f}\x1b[0m, stat : {intput_std:.2f} {corr_coef:.2f} {output_std:.2f}] {cur_step} / {number_of_steps}                       ', end='\r', sep='')
+                    f' [\x1b[31mtrain cross_entropy : {training_losses[-1]:.4f}\x1b[0m' 
+                    f', \x1b[32mval cross_entropy : {validation_cross_entropy:.4f}\x1b[0m, stat : {intput_std:.2f} {corr_coef:.2f} {output_std:.2f}] {cur_step} / {number_of_steps}                       ', end='\r', sep='')
                     
             print()
         except KeyboardInterrupt:
@@ -158,7 +173,7 @@ class Model:
 
     def test_classy(self):
         for batch in self.data.validation_batches():
-            output, mse = self._run_batch(batch, (self.output, self.mse), no_dropout=True)
+            output, cross_entropy = self._run_batch(batch, (self.output, self.crossentropy), no_dropout=True)
             truth = np.array(batch['scores'])
 
         plt.plot(truth, truth, 'r-')
@@ -167,7 +182,7 @@ class Model:
         plt.xlabel('output')
         plt.ylabel('truth')
         correlation = np.corrcoef(truth.flatten(), output.flatten())[1,0]
-        plt.title(f'output on validation set \n  mse on validation set : {mse} \n rho = {correlation}')
+        plt.title(f'output on validation set \n  cross_entropy on validation set : {cross_entropy} \n rho = {correlation}')
         plt.show()
 
         # true_classes = self._are_you_dank(truth).astype(np.int32).flatten()
@@ -199,27 +214,40 @@ class Data:
         self.train_data, self.validation_data = _test_train_split(self.train_data, 0.75)
 
     def train_batches(self, number_of_samples = 100):
+        random.shuffle(self.train_data)
         return self._get_batch(self.train_data, number_of_samples)
 
     def test_batches(self, number_of_samples = -1):
         return self._get_batch(self.test_data, number_of_samples)
 
     def validation_batches(self, number_of_samples = -1):
+        random.shuffle(self.test_data)
         return self._get_batch(self.validation_data, number_of_samples)
 
     def _get_batch(self, data, number_of_samples):
         batch = {'image':[],'sentence':[],'scores':[]}
-        random.shuffle(data)
-        for i in data:
-            batch['image'].append(i[0])
-            batch['sentence'].append(i[1])
-            batch['scores'].append([i[2]])
+
+        half = len(data) // 2
+        data_1, data_2 = data[:half], data[half:]
+
+        for d1, d2 in zip(data_1, data_2):
+            batch['image'].append((d1[0], d2[0]))
+            batch['sentence'].append((d1[1], d2[1]))
+            batch['scores'].append(d1[2] > d2[2])
             if len(batch['image']) == number_of_samples:
-                yield batch
+                yield {
+                    'image': np.array(batch['image']),
+                    'sentence': np.array(batch['sentence']),
+                    'scores': np.array(batch['scores']),
+                }
                 batch = {'image':[],'sentence':[],'scores':[]}
                 
         if batch['image']:
-            yield batch
+            yield {
+                'image': np.array(batch['image']),
+                'sentence': np.array(batch['sentence']),
+                'scores': np.array(batch['scores']),
+            }
 
 
 SAVE_NAME_WO_TEXT = 'wo_text'
@@ -232,6 +260,14 @@ def main():
 
     # data = Data()
 
+    # x = next(data._get_batch(data.test_data, -1))
+
+    # x = x['scores'][:,0] - x['scores'][:,1]
+    # plt.hist(x, bins=50)
+    # plt.show() 
+
+    # return
+
     # scores_train = [x[2] for x in data.train_data]
     # scores_test = [x[2] for x in data.test_data]
     
@@ -241,12 +277,12 @@ def main():
     # plt.title(f'train and test scores histogram')
     # plt.show()
 
-    model = Model(reg_param=0, dro_param=0.7)
-    train_losses, validation_losses = model.train(10000, save_name=None)
+    model = Model(reg_param=0, dro_param=None)
+    train_losses, validation_losses = model.train(1000, save_name=None)
     plt.plot(train_losses)
     plt.plot(validation_losses)
     plt.legend(['train', 'validation'])
-    plt.title('log scale loss on train/validation')
+    plt.title('loss on train/validation')
     plt.show()
 
     # test_loss, test_output = model.test()
@@ -256,7 +292,7 @@ def main():
     #
     # print(f'test loss {test_loss}')
 
-    model.test_classy()
+    # model.test_classy()
         
 if __name__ == '__main__':
     main()

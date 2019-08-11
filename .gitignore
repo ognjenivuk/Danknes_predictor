@@ -2,3 +2,4 @@ Data
 .vscode
 trained_models
 *.pyc
+*.png

@@ -76,15 +76,16 @@ class Data:
             }
 
 class Model:
-    def __init__(self, dro_param = None, use_text = True, beta = 0, learning_rate = 0.01):
+    def __init__(self, dro_param = None, use_text = True, beta = 0, learning_rate = 0.01, fc_units = [1024]):
         self.sess = tf.Session()
         self.keep_prob = tf.placeholder_with_default(dro_param or 1.0, (), name='keep_prob')
 
-        self.load_network_layers(use_text=use_text)
-        
+        self.load_network_layers(use_text=use_text, fc_units = fc_units)
+        self.data = Data()
         self.truth = tf.placeholder(tf.float32, shape = (None,1))
         self.loss, self.cross_entropy = self.calculate_loss(self.output, self.truth, beta)
         self.optimizer = self.get_optimizer(self.loss, learning_rate)
+        self.accuracy = tf.metrics.accuracy(self.truth, self.output_for_inference > 0.5)
 
     def _make_fc_layers(self, input, units, activation, keep_prob, kernel_regularizer):
 
@@ -105,7 +106,7 @@ class Model:
         writer = tf.summary.FileWriter('/tmp/logdir', graph=self.sess.graph)
         writer.close()
     
-    def load_network_layers(self, use_text):
+    def load_network_layers(self, use_text, fc_units):
         regulizer = tf.contrib.layers.l2_regularizer(1.0)
         self.image_encoded_1 = tf.placeholder(tf.float32, shape = (None, 1280), name='image_encoded_1')
         self.image_encoded_2 = tf.placeholder(tf.float32, shape = (None, 1280), name='image_encoded_2')
@@ -117,7 +118,7 @@ class Model:
             
         input_layer = tf.concat(input_list, axis = 1)
         
-        last_fc_layer = self._make_fc_layers(input_layer, [1024, 1024, 1024], activation=tf.nn.relu, keep_prob = self.keep_prob, kernel_regularizer=regulizer)
+        last_fc_layer = self._make_fc_layers(input_layer, fc_units, activation=tf.nn.relu, keep_prob = self.keep_prob, kernel_regularizer=regulizer)
         self.output = tf.layers.dense(last_fc_layer, units = 1, activation = None, kernel_initializer=tf.random_normal_initializer(0.0, 1.0))
         self.output_for_inference = tf.nn.sigmoid(self.output)
         
@@ -142,8 +143,7 @@ class Model:
         return output
 
     def train(self, epochs):
-
-        data = Data()
+        
         self.sess.run(tf.initialize_all_variables())
 
         saver = tf.train.Saver()
@@ -155,14 +155,14 @@ class Model:
             for epoch in range(epochs):
                 
                 cross_ents = []
-                for batch in data.train_batches(1000):
+                for batch in self.data.train_batches(1000):
                     _, ce = self._run_batch((self.optimizer, self.cross_entropy), batch)
                     cross_ents.append(ce)
 
                 training_loss = np.average(cross_ents[0])
                 training_losses.append(training_loss)
 
-                for batch in data.validation_batches(-1):
+                for batch in self.data.validation_batches(-1):
                     ce, val_output, val_truth = self._run_batch([ self.cross_entropy, self.output_for_inference, self.truth ], batch)
                     val_output = np.where(val_output > 0.5, 1, 0).flatten().astype(np.int32)
                     val_truth = np.where(val_truth > 0.5, 1, 0).flatten().astype(np.int32)
@@ -182,8 +182,8 @@ class Model:
         plt.title('cross-entropy')
         plt.show()
 
-        self._plot_results(data.train_batches(-1), 'train')
-        self._plot_results(data.validation_batches(-1), 'validation')
+        self._plot_results(self.data.train_batches(-1), 'train')
+        self._plot_results(self.data.validation_batches(-1), 'validation')
 
         
         save_name = input('model save name [default: dont save]: ')
@@ -193,7 +193,10 @@ class Model:
             saver.save(self.sess, save_path)
             print()
             print('model saved at ' + save_path)
-            
+    
+    def run_test(self):
+        self._plot_results(self.data.test_batches(-1), 'test')
+
     def _plot_results(self, batches, name):
 
         output = []
@@ -237,11 +240,20 @@ class Model:
 def main():
     #beta = regularization param
     #dro_param = keep_prbo in dropout
-    model = Model(dro_param = 1.0, beta = 0, learning_rate = 0.01)
+    random.seed(6)
+    tf.set_random_seed(6)
+    np.random.seed(6)
+
+    model = Model(dro_param = 1.0, beta = 0, learning_rate = 0.01, fc_units=[1024, 1024, 1024])
     
     model.save_grpah()
 
     model.train(1000)
+
+    run_test = input('do you want to run on test?')
+
+    if run_test == 'y':
+        model.run_test()
     
 if __name__ == "__main__":
     main()
